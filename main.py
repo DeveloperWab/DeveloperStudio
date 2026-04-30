@@ -1,8 +1,8 @@
-# main.py - Premium Earning Bot (Railway Optimized)
+# main.py - Complete Earning Bot for Railway
 import telebot
 from telebot import types
 from pymongo import MongoClient
-from pymongo.errors import ConnectionFailure, ServerSelectionTimeoutError
+from pongo.errors import ConnectionFailure
 from datetime import datetime, timedelta
 import time
 import random
@@ -15,7 +15,6 @@ from bson import ObjectId
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import threading
 import json
-from urllib.parse import urlparse
 
 # ==================== LOGGING SETUP ====================
 logging.basicConfig(
@@ -25,27 +24,37 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ==================== CONFIGURATION ====================
-API_TOKEN = os.environ.get('API_TOKEN', '8384600981:AAFOkWJEw0zPqouHrwFUYw9LI7m-eLBp1KE')
-ADMIN_PASSWORD = os.environ.get('ADMIN_PASSWORD', 'Vansh@000')
-MONGODB_URI = os.environ.get('MONGODB_URI', 'mongodb+srv://Vansh:Vansh000@cluster0.tqmuzxc.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0')
+API_TOKEN = os.environ.get('API_TOKEN', '')
+ADMIN_PASSWORD = os.environ.get('ADMIN_PASSWORD', 'admin123')
+MONGODB_URI = os.environ.get('MONGODB_URI', '')
 DB_NAME = os.environ.get('DB_NAME', 'earning_bot')
 PORT = int(os.environ.get('PORT', 8080))
 
+# Check required environment variables
+if not API_TOKEN:
+    logger.error("❌ API_TOKEN environment variable is required!")
+    logger.error("Please add it in Railway: Variables -> Add Variable -> API_TOKEN")
+    sys.exit(1)
+
+if not MONGODB_URI:
+    logger.error("❌ MONGODB_URI environment variable is required!")
+    logger.error("Please add it in Railway: Variables -> Add Variable -> MONGODB_URI")
+    sys.exit(1)
+
 # Bot Settings
-WITHDRAWAL_MIN = {
-    'upi': 50,
-    'bank': 100,
-    'crypto': 200
-}
 REFERRAL_BONUS = 3.0
 DAILY_BONUS = 2.0
 VISIT_COOLDOWN_HOURS = 24
 
 # Global Variables
 ADMIN_USER_ID = None
-bot = None
-db = None
 mongo_client = None
+db = None
+
+# ==================== INITIALIZE BOT FIRST ====================
+logger.info("Initializing Telegram Bot...")
+bot = telebot.TeleBot(API_TOKEN, threaded=False)
+logger.info("✅ Bot initialized successfully!")
 
 # ==================== DATABASE CONNECTION ====================
 def connect_mongodb():
@@ -61,10 +70,10 @@ def connect_mongodb():
         )
         mongo_client.admin.command('ping')
         db = mongo_client[DB_NAME]
-        logger.info("MongoDB connected successfully!")
+        logger.info("✅ MongoDB connected successfully!")
         return True
     except Exception as e:
-        logger.error(f"MongoDB connection failed: {e}")
+        logger.error(f"❌ MongoDB connection failed: {e}")
         return False
 
 # ==================== COLLECTIONS ====================
@@ -74,25 +83,25 @@ visit_tasks = None
 withdrawals = None
 submissions = None
 transactions = None
-announcements = None
 
 def init_collections():
-    global users, tasks, visit_tasks, withdrawals, submissions, transactions, announcements
+    global users, tasks, visit_tasks, withdrawals, submissions, transactions
     users = db['users']
     tasks = db['tasks']
     visit_tasks = db['visit_tasks']
     withdrawals = db['withdrawals']
     submissions = db['submissions']
     transactions = db['transactions']
-    announcements = db['announcements']
     
     # Create indexes
-    users.create_index('user_id', unique=True)
-    users.create_index('referral_code', unique=True, sparse=True)
-    tasks.create_index('active')
-    visit_tasks.create_index('active')
-    withdrawals.create_index([('user_id', 1), ('status', 1)])
-    logger.info("Collections initialized")
+    try:
+        users.create_index('user_id', unique=True)
+        users.create_index('referral_code', unique=True, sparse=True)
+        tasks.create_index('active')
+        visit_tasks.create_index('active')
+        logger.info("✅ Collections initialized")
+    except Exception as e:
+        logger.warning(f"Index creation warning: {e}")
 
 # ==================== HEALTH SERVER ====================
 class HealthHandler(BaseHTTPRequestHandler):
@@ -116,13 +125,15 @@ class HealthHandler(BaseHTTPRequestHandler):
         pass
 
 def start_health_server():
-    server = HTTPServer(('0.0.0.0', PORT), HealthHandler)
-    logger.info(f"Health server running on port {PORT}")
-    server.serve_forever()
+    try:
+        server = HTTPServer(('0.0.0.0', PORT), HealthHandler)
+        logger.info(f"🏥 Health server running on port {PORT}")
+        server.serve_forever()
+    except Exception as e:
+        logger.error(f"Health server error: {e}")
 
 # ==================== HELPER FUNCTIONS ====================
 def generate_referral_code():
-    """Generate unique referral code"""
     chars = string.ascii_uppercase + string.digits
     for _ in range(10):
         code = ''.join(random.choices(chars, k=8))
@@ -131,14 +142,13 @@ def generate_referral_code():
     return f"USER{random.randint(10000, 99999)}"
 
 def get_user(user_id):
-    """Get user by Telegram ID"""
     try:
         return users.find_one({'user_id': str(user_id)})
-    except:
+    except Exception as e:
+        logger.error(f"Get user error: {e}")
         return None
 
 def update_balance(user_id, amount, operation='add'):
-    """Update user balance"""
     try:
         user = get_user(user_id)
         if not user:
@@ -149,11 +159,11 @@ def update_balance(user_id, amount, operation='add'):
             return False
         users.update_one({'user_id': str(user_id)}, {'$set': {'balance': new_balance}})
         return True
-    except:
+    except Exception as e:
+        logger.error(f"Update balance error: {e}")
         return False
 
 def add_transaction(user_id, amount, tx_type, description):
-    """Record transaction"""
     try:
         transactions.insert_one({
             'user_id': str(user_id),
@@ -163,25 +173,19 @@ def add_transaction(user_id, amount, tx_type, description):
             'date': datetime.now(),
             'status': 'completed'
         })
-        users.update_one({'user_id': str(user_id)}, {'$inc': {'total_earned': amount if amount > 0 else 0}})
-    except:
-        pass
+        if amount > 0:
+            users.update_one({'user_id': str(user_id)}, {'$inc': {'total_earned': amount}})
+    except Exception as e:
+        logger.error(f"Add transaction error: {e}")
 
 def format_money(amount):
-    """Format currency"""
     try:
         return f"₹{float(amount):.2f}"
     except:
         return "₹0.00"
 
-def is_valid_upi(upi_id):
-    """Validate UPI ID"""
-    pattern = r'^[a-zA-Z0-9.\-_]{2,256}@[a-zA-Z]{3,}$'
-    return re.match(pattern, upi_id) is not None
-
 # ==================== KEYBOARDS ====================
 def main_keyboard():
-    """Main user keyboard"""
     keyboard = types.ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
     buttons = [
         types.KeyboardButton('📝 Tasks'),
@@ -191,7 +195,6 @@ def main_keyboard():
         types.KeyboardButton('👥 Referral Program'),
         types.KeyboardButton('🎁 Daily Bonus'),
         types.KeyboardButton('📊 My Stats'),
-        types.KeyboardButton('📢 Announcements'),
         types.KeyboardButton('❓ Help'),
         types.KeyboardButton('ℹ️ About')
     ]
@@ -199,14 +202,11 @@ def main_keyboard():
     return keyboard
 
 def admin_keyboard():
-    """Admin keyboard"""
     keyboard = types.ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
     buttons = [
         types.KeyboardButton('📊 Dashboard'),
         types.KeyboardButton('👥 User Stats'),
         types.KeyboardButton('💰 Financial Stats'),
-        types.KeyboardButton('📝 Manage Tasks'),
-        types.KeyboardButton('🔗 Manage Visit Tasks'),
         types.KeyboardButton('💸 Withdrawal Requests'),
         types.KeyboardButton('📋 Pending Submissions'),
         types.KeyboardButton('📢 Broadcast'),
@@ -218,13 +218,11 @@ def admin_keyboard():
     return keyboard
 
 def withdrawal_keyboard():
-    """Withdrawal method selection"""
     keyboard = types.InlineKeyboardMarkup(row_width=1)
     keyboard.add(
         types.InlineKeyboardButton('💳 UPI (Min ₹50)', callback_data='wd_upi'),
-        types.InlineKeyboardButton('🏦 Bank Transfer (Min ₹100)', callback_data='wd_bank'),
-        types.InlineKeyboardButton('₿ Crypto (Min ₹200)', callback_data='wd_crypto'),
-        types.InlineKeyboardButton('🔙 Back', callback_data='wd_back')
+        types.InlineKeyboardButton('🏦 Bank (Min ₹100)', callback_data='wd_bank'),
+        types.InlineKeyboardButton('₿ Crypto (Min ₹200)', callback_data='wd_crypto')
     )
     return keyboard
 
@@ -237,13 +235,11 @@ def cmd_start(message):
     
     user = get_user(user_id)
     
-    # Parse referral
     ref_code = None
     if len(message.text.split()) > 1:
         ref_code = message.text.split()[1]
     
     if not user:
-        # Create new user
         new_code = generate_referral_code()
         
         user_data = {
@@ -266,23 +262,18 @@ def cmd_start(message):
             'is_banned': False
         }
         
-        # Handle referral
         if ref_code:
             referrer = users.find_one({'referral_code': ref_code})
             if referrer and referrer['user_id'] != user_id:
                 user_data['referred_by'] = referrer['user_id']
-                # Credit bonus to referrer
                 update_balance(referrer['user_id'], REFERRAL_BONUS, 'add')
                 add_transaction(referrer['user_id'], REFERRAL_BONUS, 'referral', f'New user: {first_name}')
                 users.update_one({'user_id': referrer['user_id']}, {
                     '$inc': {'total_referrals': 1, 'referral_earnings': REFERRAL_BONUS}
                 })
-                # Notify referrer
                 try:
                     bot.send_message(int(referrer['user_id']), 
-                        f"🎉 *New Referral!*\n\n{first_name} joined using your link!\n"
-                        f"💰 You earned {format_money(REFERRAL_BONUS)}\n"
-                        f"📊 Total Referrals: {referrer.get('total_referrals', 0) + 1}",
+                        f"🎉 *New Referral!*\n\n{first_name} joined!\n💰 You earned {format_money(REFERRAL_BONUS)}",
                         parse_mode='Markdown')
                 except:
                     pass
@@ -293,23 +284,17 @@ def cmd_start(message):
 🎉 *Welcome to Earning Pro, {first_name}!*
 
 💰 *Earn Money Easily:*
-
-✅ *Complete Tasks* - Earn up to ₹100/task
-🔗 *Visit Websites* - Earn by visiting links
-👥 *Refer Friends* - Earn {format_money(REFERRAL_BONUS)} per referral
-🎁 *Daily Bonus* - Claim daily rewards
-💸 *Fast Withdrawals* - Get paid instantly
+✅ Complete Tasks - Earn up to ₹100/task
+🔗 Visit Websites - Earn by visiting links
+👥 Refer Friends - Earn {format_money(REFERRAL_BONUS)} per referral
+🎁 Daily Bonus - Claim daily rewards
+💸 Fast Withdrawals - Get paid instantly
 
 🔑 *Your Referral Code:* `{new_code}`
 
-📤 *Share with friends:* `https://t.me/{bot.get_me().username}?start={new_code}`
+⚠️ *Rules:* One account per person | No fake submissions
 
-⚠️ *Rules:*
-• One account per person
-• Complete tasks honestly
-• No fake submissions = Permanent Ban
-
-🚀 *Start earning now! Click the buttons below*
+🚀 *Start earning now!*
 """
         bot.send_message(message.chat.id, welcome_text, parse_mode='Markdown', reply_markup=main_keyboard())
     else:
@@ -330,47 +315,31 @@ Tap a button below to continue earning! 🚀
 """
         bot.send_message(message.chat.id, welcome_back, parse_mode='Markdown', reply_markup=main_keyboard())
 
-# ==================== BALANCE HANDLER ====================
 @bot.message_handler(func=lambda m: m.text == '💰 My Balance')
 def show_balance(message):
     user = get_user(message.from_user.id)
-    if not user:
+    if not user or user.get('is_banned', False):
         bot.send_message(message.chat.id, "❌ Please use /start first!")
         return
-    
-    if user.get('is_banned', False):
-        bot.send_message(message.chat.id, "❌ You are banned!")
-        return
-    
-    bal = user.get('balance', 0)
-    earned = user.get('total_earned', 0)
-    withdrawn = user.get('total_withdrawn', 0)
-    ref_count = user.get('total_referrals', 0)
-    ref_earn = user.get('referral_earnings', 0)
     
     text = f"""
 💰 *YOUR WALLET*
 
-┌─────────────────┐
-│ 💵 Balance: {format_money(bal)}
-│ 📈 Total Earned: {format_money(earned)}
-│ 💸 Total Withdrawn: {format_money(withdrawn)}
-└─────────────────┘
+💵 Balance: {format_money(user.get('balance', 0))}
+📈 Total Earned: {format_money(user.get('total_earned', 0))}
+💸 Total Withdrawn: {format_money(user.get('total_withdrawn', 0))}
 
 👥 *Referral Stats*
-├ 👤 Referrals: {ref_count}
-├ 🎁 Referral Earnings: {format_money(ref_earn)}
+├ 👤 Referrals: {user.get('total_referrals', 0)}
+├ 🎁 Referral Earnings: {format_money(user.get('referral_earnings', 0))}
 └ 🔑 Code: `{user.get('referral_code')}`
 
 📊 *Activity*
 ├ ✅ Tasks Done: {len(user.get('completed_tasks', []))}
 └ 🔗 Visits Done: {len(user.get('completed_visits', []))}
-
-💪 *Keep earning to reach withdrawal minimum!*
 """
     bot.send_message(message.chat.id, text, parse_mode='Markdown')
 
-# ==================== STATS HANDLER ====================
 @bot.message_handler(func=lambda m: m.text == '📊 My Stats')
 def show_stats(message):
     user = get_user(message.from_user.id)
@@ -382,18 +351,13 @@ def show_stats(message):
     if isinstance(joined, str):
         joined = datetime.fromisoformat(joined)
     
-    last_active = user.get('last_active')
-    if isinstance(last_active, str):
-        last_active = datetime.fromisoformat(last_active)
-    
     text = f"""
 📊 *YOUR STATISTICS*
 
 👤 *Profile*
 ├ ID: `{user['user_id']}`
 ├ Username: @{user.get('username', 'N/A')}
-├ Joined: {joined.strftime('%d %b %Y') if joined else 'N/A'}
-└ Last Active: {last_active.strftime('%d %b %Y, %H:%M') if last_active else 'N/A'}
+└ Joined: {joined.strftime('%d %b %Y') if joined else 'N/A'}
 
 💰 *Financial*
 ├ Balance: {format_money(user.get('balance', 0))}
@@ -403,18 +367,14 @@ def show_stats(message):
 👥 *Referrals*
 ├ Code: `{user.get('referral_code')}`
 ├ Total: {user.get('total_referrals', 0)}
-├ Earnings: {format_money(user.get('referral_earnings', 0))}
-└ Referred By: {user.get('referred_by', 'None')}
+└ Earnings: {format_money(user.get('referral_earnings', 0))}
 
 📈 *Completed*
 ├ Tasks: {len(user.get('completed_tasks', []))}
 └ Visits: {len(user.get('completed_visits', []))}
-
-🔥 *Keep grinding! Share your referral code*
 """
     bot.send_message(message.chat.id, text, parse_mode='Markdown')
 
-# ==================== REFERRAL HANDLER ====================
 @bot.message_handler(func=lambda m: m.text == '👥 Referral Program')
 def show_referral(message):
     user = get_user(message.from_user.id)
@@ -443,17 +403,9 @@ def show_referral(message):
 📊 *Your Stats:*
 ├ ✅ Referrals: {user.get('total_referrals', 0)}
 └ 💵 Earned: {format_money(user.get('referral_earnings', 0))}
-
-📢 *Tips to earn more:*
-• Share on WhatsApp, Telegram, Instagram
-• Post in groups and channels
-• Tell friends about earning opportunities
-
-🚀 *Start sharing now!*
 """
     bot.send_message(message.chat.id, text, parse_mode='Markdown', disable_web_page_preview=True)
 
-# ==================== DAILY BONUS ====================
 @bot.message_handler(func=lambda m: m.text == '🎁 Daily Bonus')
 def daily_bonus(message):
     user = get_user(message.from_user.id)
@@ -474,7 +426,6 @@ def daily_bonus(message):
                 parse_mode='Markdown')
             return
     
-    # Give bonus
     update_balance(message.from_user.id, DAILY_BONUS, 'add')
     add_transaction(message.from_user.id, DAILY_BONUS, 'bonus', 'Daily Bonus')
     users.update_one({'user_id': str(message.from_user.id)}, {'$set': {'daily_bonus_last': datetime.now()}})
@@ -487,12 +438,9 @@ def daily_bonus(message):
 📈 *New Balance:* {format_money(user.get('balance', 0) + DAILY_BONUS)}
 
 ⏰ Come back tomorrow for more!
-
-💪 *Complete tasks to earn even more!*
 """
     bot.send_message(message.chat.id, text, parse_mode='Markdown')
 
-# ==================== TASKS HANDLER ====================
 @bot.message_handler(func=lambda m: m.text == '📝 Tasks')
 def show_tasks(message):
     user = get_user(message.from_user.id)
@@ -516,12 +464,10 @@ def show_tasks(message):
             ))
     
     if not keyboard.keyboard:
-        bot.send_message(message.chat.id, "✅ You've completed all available tasks! New tasks coming soon.")
+        bot.send_message(message.chat.id, "✅ You've completed all available tasks!")
         return
     
-    bot.send_message(message.chat.id, 
-        "📝 *AVAILABLE TASKS*\n\nClick a task below to view details and submit proof:",
-        parse_mode='Markdown', reply_markup=keyboard)
+    bot.send_message(message.chat.id, "📝 *AVAILABLE TASKS*\n\nClick a task below:", parse_mode='Markdown', reply_markup=keyboard)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('view_task_'))
 def view_task(call):
@@ -532,18 +478,13 @@ def view_task(call):
         bot.answer_callback_query(call.id, "Task not found!")
         return
     
-    user = get_user(call.from_user.id)
-    if task_id in user.get('completed_tasks', []):
-        bot.answer_callback_query(call.id, "You've already completed this task!")
-        return
-    
     text = f"""
 📝 *{task['title']}*
 
 💰 *Reward:* {format_money(task['amount'])}
-📋 *Description:* {task.get('description', 'Complete the task as instructed')}
+📋 *Description:* {task.get('description', 'Complete the task')}
 
-🔗 *Link:* {task.get('link', 'No link provided')}
+🔗 *Link:* {task.get('link', 'No link')}
 
 ✅ *Instructions:*
 1. Click the link above
@@ -551,12 +492,12 @@ def view_task(call):
 3. Take a clear screenshot
 4. Submit using the button below
 
-⚠️ *Warning:* Fake submissions will result in a permanent ban!
+⚠️ *Fake submissions = Permanent Ban!*
 """
     
     keyboard = types.InlineKeyboardMarkup()
     keyboard.add(types.InlineKeyboardButton("📸 Submit Proof", callback_data=f"submit_task_{task_id}"))
-    keyboard.add(types.InlineKeyboardButton("🔙 Back to Tasks", callback_data="back_to_tasks"))
+    keyboard.add(types.InlineKeyboardButton("🔙 Back", callback_data="back_to_tasks"))
     
     try:
         bot.edit_message_text(text, call.message.chat.id, call.message.message_id,
@@ -578,7 +519,7 @@ def submit_task(call):
     
     bot.answer_callback_query(call.id)
     msg = bot.send_message(call.message.chat.id,
-        f"📸 *Submit Proof for:* {task['title']}\n\nPlease send a screenshot of completed task.\nType 'cancel' to cancel.",
+        f"📸 *Submit Proof for:* {task['title']}\n\nPlease send a screenshot.\nType 'cancel' to cancel.",
         parse_mode='Markdown')
     
     bot.register_next_step_handler(msg, save_submission, task_id, task)
@@ -609,14 +550,13 @@ def save_submission(message, task_id, task):
     submissions.insert_one(submission)
     
     bot.send_message(message.chat.id,
-        f"✅ *Submission Received!*\n\nTask: {task['title']}\nReward: {format_money(task['amount'])}\n\n⏳ Waiting for admin approval.\nYou will be notified once approved.",
+        f"✅ *Submission Received!*\n\nTask: {task['title']}\nReward: {format_money(task['amount'])}\n\n⏳ Waiting for admin approval.",
         parse_mode='Markdown', reply_markup=main_keyboard())
     
-    # Notify admin
     if ADMIN_USER_ID:
         try:
             bot.send_message(ADMIN_USER_ID,
-                f"📋 *New Task Submission*\n\n👤 @{message.from_user.username}\n📝 {task['title']}\n💰 {format_money(task['amount'])}",
+                f"📋 *New Submission*\n👤 @{message.from_user.username}\n📝 {task['title']}",
                 parse_mode='Markdown')
         except:
             pass
@@ -629,7 +569,6 @@ def back_to_tasks(call):
         pass
     show_tasks(call.message)
 
-# ==================== VISIT TASKS ====================
 @bot.message_handler(func=lambda m: m.text == '🔗 Visit & Earn')
 def show_visit_tasks(message):
     user = get_user(message.from_user.id)
@@ -640,32 +579,18 @@ def show_visit_tasks(message):
     available_tasks = list(visit_tasks.find({'active': True}))
     
     if not available_tasks:
-        bot.send_message(message.chat.id, "🔗 No visit tasks available right now. Check back later!")
+        bot.send_message(message.chat.id, "🔗 No visit tasks available!")
         return
     
     keyboard = types.InlineKeyboardMarkup(row_width=1)
     for task in available_tasks:
         task_id = str(task['_id'])
-        # Check cooldown
-        last_completed = None
-        for visit in user.get('completed_visits', []):
-            if visit.get('task_id') == task_id:
-                last_completed = visit.get('completed_at')
-                break
-        
-        if not last_completed or (datetime.now() - last_completed).total_seconds() > VISIT_COOLDOWN_HOURS * 3600:
-            keyboard.add(types.InlineKeyboardButton(
-                f"{task['title']} - {format_money(task['amount'])} ({task['time_required']}s)",
-                callback_data=f"start_visit_{task_id}"
-            ))
+        keyboard.add(types.InlineKeyboardButton(
+            f"{task['title']} - {format_money(task['amount'])} ({task['time_required']}s)",
+            callback_data=f"start_visit_{task_id}"
+        ))
     
-    if not keyboard.keyboard:
-        bot.send_message(message.chat.id, f"⏰ All tasks are on cooldown. Come back after {VISIT_COOLDOWN_HOURS} hours!")
-        return
-    
-    bot.send_message(message.chat.id,
-        "🔗 *VISIT & EARN*\n\nVisit websites, stay for required time, and earn instantly!",
-        parse_mode='Markdown', reply_markup=keyboard)
+    bot.send_message(message.chat.id, "🔗 *VISIT & EARN*\n\nVisit websites and earn instantly!", parse_mode='Markdown', reply_markup=keyboard)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('start_visit_'))
 def start_visit(call):
@@ -676,7 +601,6 @@ def start_visit(call):
         bot.answer_callback_query(call.id, "Task not found!")
         return
     
-    # Store start time
     users.update_one({'user_id': str(call.from_user.id)},
         {'$set': {f'visit_start_{task_id}': datetime.now()}})
     
@@ -691,14 +615,11 @@ def start_visit(call):
 1. Click the link above
 2. Stay on the page for {task['time_required']} seconds
 3. Click "✅ Complete Visit" button below
-4. You'll be credited instantly!
-
-💡 *Tip:* Don't close the page too early!
 """
     
     keyboard = types.InlineKeyboardMarkup()
     keyboard.add(types.InlineKeyboardButton("✅ Complete Visit", callback_data=f"complete_visit_{task_id}"))
-    keyboard.add(types.InlineKeyboardButton("🔙 Back to Tasks", callback_data="back_to_visit_tasks"))
+    keyboard.add(types.InlineKeyboardButton("🔙 Back", callback_data="back_to_visit_tasks"))
     
     try:
         bot.edit_message_text(text, call.message.chat.id, call.message.message_id,
@@ -731,12 +652,10 @@ def complete_visit(call):
     elapsed = (datetime.now() - start_time).total_seconds()
     
     if elapsed >= task['time_required']:
-        # Credit reward
         amount = task['amount']
         update_balance(call.from_user.id, amount, 'add')
-        add_transaction(call.from_user.id, amount, 'visit', f'Visit Task: {task["title"]}')
+        add_transaction(call.from_user.id, amount, 'visit', f'Visit: {task["title"]}')
         
-        # Update user record
         users.update_one({'user_id': str(call.from_user.id)}, {
             '$push': {'completed_visits': {
                 'task_id': task_id,
@@ -749,8 +668,7 @@ def complete_visit(call):
         bot.answer_callback_query(call.id, f"✅ Earned {format_money(amount)}!")
         
         try:
-            bot.edit_message_text(
-                f"✅ *VISIT COMPLETED!*\n\n💰 You earned {format_money(amount)}\n\n⏰ Come back after {VISIT_COOLDOWN_HOURS} hours for more!",
+            bot.edit_message_text(f"✅ *COMPLETED!*\n\n💰 You earned {format_money(amount)}",
                 call.message.chat.id, call.message.message_id, parse_mode='Markdown')
         except:
             pass
@@ -766,7 +684,6 @@ def back_to_visit_tasks(call):
         pass
     show_visit_tasks(call.message)
 
-# ==================== WITHDRAWAL SYSTEM ====================
 @bot.message_handler(func=lambda m: m.text == '💸 Withdraw')
 def withdraw_menu(message):
     user = get_user(message.from_user.id)
@@ -776,17 +693,16 @@ def withdraw_menu(message):
     
     bal = user.get('balance', 0)
     
-    # Check for pending withdrawal
     pending = withdrawals.find_one({'user_id': str(message.from_user.id), 'status': 'pending'})
     if pending:
         bot.send_message(message.chat.id,
-            f"⚠️ *Pending Withdrawal Request*\n\nAmount: {format_money(pending['amount'])}\nStatus: Pending Approval\n\nPlease wait for admin to process.",
+            f"⚠️ *Pending Withdrawal*\nAmount: {format_money(pending['amount'])}",
             parse_mode='Markdown')
         return
     
     if bal < 50:
         bot.send_message(message.chat.id,
-            f"❌ *Insufficient Balance*\n\nYour Balance: {format_money(bal)}\nMinimum Withdrawal: ₹50\n\nComplete more tasks to reach the minimum!",
+            f"❌ *Insufficient Balance*\nBalance: {format_money(bal)}\nMinimum: ₹50",
             parse_mode='Markdown')
         return
     
@@ -795,24 +711,17 @@ def withdraw_menu(message):
 
 💰 *Available Balance:* {format_money(bal)}
 
-📋 *Withdrawal Methods:*
+📋 *Methods:*
 • 💳 UPI - Min ₹50
-• 🏦 Bank Transfer - Min ₹100  
+• 🏦 Bank - Min ₹100  
 • ₿ Crypto - Min ₹200
 
-⏱️ *Processing Time:* 24-48 hours
-
-Select your withdrawal method below:
+Select method below:
 """
-    
     bot.send_message(message.chat.id, text, parse_mode='Markdown', reply_markup=withdrawal_keyboard())
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('wd_'))
 def withdrawal_method(call):
-    if call.data == 'wd_back':
-        bot.delete_message(call.message.chat.id, call.message.message_id)
-        return
-    
     method = call.data.replace('wd_', '')
     methods = {'upi': 'UPI', 'bank': 'Bank Transfer', 'crypto': 'Crypto'}
     min_amounts = {'upi': 50, 'bank': 100, 'crypto': 200}
@@ -822,42 +731,41 @@ def withdrawal_method(call):
     min_amt = min_amounts.get(method, 50)
     
     if bal < min_amt:
-        bot.answer_callback_query(call.id, f"Minimum withdrawal is ₹{min_amt} for {methods.get(method)}!", show_alert=True)
+        bot.answer_callback_query(call.id, f"Minimum is ₹{min_amt} for {methods.get(method)}!", show_alert=True)
         return
     
     bot.answer_callback_query(call.id)
     
     msg = bot.send_message(call.message.chat.id,
-        f"💸 *{methods.get(method)} Withdrawal*\n\n💰 Balance: {format_money(bal)}\n💰 Minimum: ₹{min_amt}\n\nEnter amount to withdraw (or 'cancel'):",
+        f"💸 *{methods.get(method)} Withdrawal*\n\nBalance: {format_money(bal)}\nMinimum: ₹{min_amt}\n\nEnter amount:",
         parse_mode='Markdown')
     
     bot.register_next_step_handler(msg, process_withdrawal_amount, method, min_amt)
 
 def process_withdrawal_amount(message, method, min_amt):
     if message.text and message.text.lower() == 'cancel':
-        bot.send_message(message.chat.id, "❌ Withdrawal cancelled.", reply_markup=main_keyboard())
+        bot.send_message(message.chat.id, "❌ Cancelled.", reply_markup=main_keyboard())
         return
     
     try:
         amount = float(message.text)
     except:
-        bot.send_message(message.chat.id, "❌ Please enter a valid number!")
+        bot.send_message(message.chat.id, "❌ Enter a valid number!")
         return
     
     if amount < min_amt:
-        bot.send_message(message.chat.id, f"❌ Minimum withdrawal amount is ₹{min_amt}!")
+        bot.send_message(message.chat.id, f"❌ Minimum amount is ₹{min_amt}!")
         return
     
     user = get_user(message.from_user.id)
     if amount > user.get('balance', 0):
-        bot.send_message(message.chat.id, f"❌ Insufficient balance! Your balance is {format_money(user.get('balance', 0))}")
+        bot.send_message(message.chat.id, f"❌ Insufficient balance!")
         return
     
-    # Ask for account details
     prompts = {
-        'upi': "📱 *Enter your UPI ID:*\n\nExample: name@okhdfcbank\n\nSend 'cancel' to cancel",
-        'bank': "🏦 *Enter your bank details:*\n\nSend in this format:\n`Account Holder Name\nAccount Number\nIFSC Code\nBank Name`\n\nSend 'cancel' to cancel",
-        'crypto': "₿ *Enter your wallet address:*\n\nSend your BTC/USDT wallet address\nSend 'cancel' to cancel"
+        'upi': "📱 *Enter your UPI ID:*\nExample: name@okhdfcbank",
+        'bank': "🏦 *Enter bank details:*\nName\nAccount No\nIFSC\nBank Name",
+        'crypto': "₿ *Enter wallet address:"
     }
     
     msg = bot.send_message(message.chat.id, prompts.get(method), parse_mode='Markdown')
@@ -865,15 +773,13 @@ def process_withdrawal_amount(message, method, min_amt):
 
 def save_withdrawal_request(message, method, amount):
     if message.text and message.text.lower() == 'cancel':
-        bot.send_message(message.chat.id, "❌ Withdrawal cancelled.", reply_markup=main_keyboard())
+        bot.send_message(message.chat.id, "❌ Cancelled.", reply_markup=main_keyboard())
         return
     
     details = message.text
     
-    # Deduct balance
     update_balance(message.from_user.id, amount, 'subtract')
     
-    # Create withdrawal request
     request = {
         'user_id': str(message.from_user.id),
         'username': message.from_user.username or "unknown",
@@ -886,24 +792,20 @@ def save_withdrawal_request(message, method, amount):
     }
     
     withdrawals.insert_one(request)
-    
     users.update_one({'user_id': str(message.from_user.id)}, {'$inc': {'total_withdrawn': amount}})
-    add_transaction(message.from_user.id, -amount, 'withdrawal', f'Withdrawal request via {method.upper()}')
+    add_transaction(message.from_user.id, -amount, 'withdrawal', f'Withdrawal via {method.upper()}')
     
     bot.send_message(message.chat.id,
-        f"✅ *Withdrawal Request Submitted!*\n\n💰 Amount: {format_money(amount)}\n💳 Method: {method.upper()}\n\n⏱️ Processing Time: 24-48 hours\n\nUse /check_withdrawal to track status",
+        f"✅ *Withdrawal Request Submitted!*\n\nAmount: {format_money(amount)}\nMethod: {method.upper()}\n\nProcessing: 24-48 hours",
         parse_mode='Markdown', reply_markup=main_keyboard())
     
-    # Notify admin
     if ADMIN_USER_ID:
         try:
-            bot.send_message(ADMIN_USER_ID,
-                f"💸 *New Withdrawal Request*\n\n👤 @{message.from_user.username}\n💰 {format_money(amount)}\n💳 {method.upper()}\n📝 `{details[:100]}`",
-                parse_mode='Markdown')
+            bot.send_message(ADMIN_USER_ID, f"💸 *New Withdrawal*\n@{message.from_user.username}\n{format_money(amount)}", parse_mode='Markdown')
         except:
             pass
 
-@bot.message_handler(commands=['check_withdrawal'])
+@bot.message_handler(commands=['check'])
 def check_withdrawal(message):
     requests = list(withdrawals.find({'user_id': str(message.from_user.id)}).sort('requested_at', -1).limit(5))
     
@@ -913,65 +815,34 @@ def check_withdrawal(message):
     
     text = "💸 *YOUR WITHDRAWALS*\n\n"
     for req in requests:
-        status_emoji = {'pending': '⏳', 'approved': '✅', 'completed': '✅', 'rejected': '❌'}.get(req['status'], '❓')
+        emoji = {'pending': '⏳', 'approved': '✅', 'rejected': '❌'}.get(req['status'], '❓')
         req_date = req['requested_at']
         if isinstance(req_date, str):
             req_date = datetime.fromisoformat(req_date)
-        
-        text += f"{status_emoji} *{req['method'].upper()}* - {format_money(req['amount'])}\n"
-        text += f"   Status: {req['status'].upper()}\n"
-        text += f"   Date: {req_date.strftime('%d/%m/%Y')}\n\n"
+        text += f"{emoji} {req['method'].upper()} - {format_money(req['amount'])}\n   Status: {req['status'].upper()}\n   Date: {req_date.strftime('%d/%m/%Y')}\n\n"
     
     bot.send_message(message.chat.id, text, parse_mode='Markdown')
 
-# ==================== ANNOUNCEMENTS ====================
-@bot.message_handler(func=lambda m: m.text == '📢 Announcements')
-def show_announcements(message):
-    announcement_list = list(announcements.find().sort('created_at', -1).limit(5))
-    
-    if not announcement_list:
-        bot.send_message(message.chat.id, "📢 No announcements yet. Check back later!")
-        return
-    
-    text = "📢 *LATEST ANNOUNCEMENTS*\n\n"
-    for ann in announcement_list:
-        created = ann['created_at']
-        if isinstance(created, str):
-            created = datetime.fromisoformat(created)
-        text += f"📌 *{ann['title']}*\n{ann['content']}\n📅 {created.strftime('%d %b %Y')}\n\n---\n\n"
-    
-    bot.send_message(message.chat.id, text, parse_mode='Markdown')
-
-# ==================== HELP & ABOUT ====================
 @bot.message_handler(func=lambda m: m.text == '❓ Help')
 def show_help(message):
     text = """
 ❓ *HELP & SUPPORT*
 
 📝 *How to Earn:*
-1. Click "📝 Tasks" - Complete tasks and submit proof
-2. Click "🔗 Visit & Earn" - Visit websites, stay for required time
-3. Click "👥 Referral Program" - Share your link and earn per referral
-4. Click "🎁 Daily Bonus" - Claim free bonus every 24 hours
+1. Click "📝 Tasks" - Complete tasks
+2. Click "🔗 Visit & Earn" - Visit websites
+3. Click "👥 Referral Program" - Share your link
+4. Click "🎁 Daily Bonus" - Claim daily reward
 
-💸 *How to Withdraw:*
-1. Earn minimum ₹50
-2. Click "💸 Withdraw"
-3. Select payment method
-4. Enter details and amount
-5. Wait 24-48 hours for processing
+💸 *Withdrawal:*
+• Minimum: ₹50 (UPI), ₹100 (Bank), ₹200 (Crypto)
+• Processing: 24-48 hours
 
-⚠️ *Rules:*
-• One account per person
-• Fake submissions = Permanent Ban
-• No cheating or automation
-• Respect other users
+⚠️ *Rules: No fake submissions = Permanent Ban*
 
-📞 *Support Contact:* @Admin
-
-🔗 *Share Bot:* `https://t.me/{}?start=ref`
+📞 Support: @Admin
 """
-    bot.send_message(message.chat.id, text.format(bot.get_me().username), parse_mode='Markdown', disable_web_page_preview=True)
+    bot.send_message(message.chat.id, text, parse_mode='Markdown')
 
 @bot.message_handler(func=lambda m: m.text == 'ℹ️ About')
 def show_about(message):
@@ -981,28 +852,20 @@ def show_about(message):
 ℹ️ *ABOUT EARNING PRO*
 
 🤖 *Version:* 3.0
-📅 *Launched:* 2024
 
 ✨ *Features:*
 • ✅ Task Completion
 • 🔗 Website Visits
 • 👥 Referral Program (₹{REFERRAL_BONUS}/referral)
 • 🎁 Daily Bonus (₹{DAILY_BONUS}/day)
-• 💸 Multiple Withdrawal Methods
-• 📢 Announcements
+• 💸 Multiple Withdrawals
 
 📊 *Statistics:*
 👥 Total Users: {total_users}+
 
-💪 *Our Mission:*
-Provide easy earning opportunities for everyone!
-
 📞 *Support:* @Admin
-🔗 *Bot Link:* `https://t.me/{bot.get_me().username}`
-
-⚠️ *Terms apply. No fake submissions.*
 """
-    bot.send_message(message.chat.id, text, parse_mode='Markdown', disable_web_page_preview=True)
+    bot.send_message(message.chat.id, text, parse_mode='Markdown')
 
 # ==================== ADMIN PANEL ====================
 @bot.message_handler(func=lambda m: m.text == ADMIN_PASSWORD)
@@ -1018,7 +881,7 @@ def admin_exit(message):
         ADMIN_USER_ID = None
         bot.send_message(message.chat.id, "👋 Exited admin panel.", reply_markup=main_keyboard())
     else:
-        bot.send_message(message.chat.id, "Use /start for main menu.", reply_markup=main_keyboard())
+        bot.send_message(message.chat.id, "Main menu.", reply_markup=main_keyboard())
 
 @bot.message_handler(func=lambda m: m.text == '📊 Dashboard')
 def admin_dashboard(message):
@@ -1027,7 +890,6 @@ def admin_dashboard(message):
     
     total_users = users.count_documents({})
     active_24h = users.count_documents({'last_active': {'$gte': datetime.now() - timedelta(hours=24)}})
-    banned = users.count_documents({'is_banned': True})
     pending_withdrawals = withdrawals.count_documents({'status': 'pending'})
     pending_submissions = submissions.count_documents({'status': 'pending'})
     
@@ -1037,17 +899,14 @@ def admin_dashboard(message):
 👥 *Users:*
 ├ Total: {total_users}
 ├ Active (24h): {active_24h}
-└ Banned: {banned}
 
-💰 *Financial:*
-├ Pending Withdrawals: {pending_withdrawals}
-└ Pending Submissions: {pending_submissions}
+💰 *Pending:*
+├ Withdrawals: {pending_withdrawals}
+└ Submissions: {pending_submissions}
 
 📝 *Tasks:*
 ├ Active Tasks: {tasks.count_documents({'active': True})}
 └ Active Visit Tasks: {visit_tasks.count_documents({'active': True})}
-
-📌 Use the buttons below to manage the bot.
 """
     bot.send_message(message.chat.id, text, parse_mode='Markdown')
 
@@ -1056,7 +915,6 @@ def admin_user_stats(message):
     if message.chat.id != ADMIN_USER_ID:
         return
     
-    # Get top referrers
     top_referrers = list(users.find().sort('total_referrals', -1).limit(5))
     top_earners = list(users.find().sort('total_earned', -1).limit(5))
     
@@ -1080,29 +938,22 @@ def admin_financial_stats(message):
         '_id': None,
         'total_balance': {'$sum': '$balance'},
         'total_earned': {'$sum': '$total_earned'},
-        'total_withdrawn': {'$sum': '$total_withdrawn'},
-        'total_referral_earnings': {'$sum': '$referral_earnings'}
+        'total_withdrawn': {'$sum': '$total_withdrawn'}
     }}]
     
     result = list(users.aggregate(pipeline))
     stats = result[0] if result else {}
     
-    pending_withdrawals = withdrawals.count_documents({'status': 'pending'})
-    pending_amount = sum([w['amount'] for w in withdrawals.find({'status': 'pending'})]) if pending_withdrawals > 0 else 0
+    pending_amount = sum([w['amount'] for w in withdrawals.find({'status': 'pending'})])
     
     text = f"""
 💰 *FINANCIAL STATISTICS*
 
-💵 *User Balances:* {format_money(stats.get('total_balance', 0))}
-📈 *Total Earned:* {format_money(stats.get('total_earned', 0))}
-💸 *Total Withdrawn:* {format_money(stats.get('total_withdrawn', 0))}
-🎁 *Referral Payouts:* {format_money(stats.get('total_referral_earnings', 0))}
+💵 User Balances: {format_money(stats.get('total_balance', 0))}
+📈 Total Earned: {format_money(stats.get('total_earned', 0))}
+💸 Total Withdrawn: {format_money(stats.get('total_withdrawn', 0))}
 
-⏳ *Pending Withdrawals:* {format_money(pending_amount)} ({pending_withdrawals} requests)
-
-📊 *System Health:*
-├ Profit Margin: {format_money(stats.get('total_earned', 0) - stats.get('total_withdrawn', 0))}
-└ Reserved Balance: {format_money(stats.get('total_balance', 0) - pending_amount)}
+⏳ Pending Withdrawals: {format_money(pending_amount)}
 """
     bot.send_message(message.chat.id, text, parse_mode='Markdown')
 
@@ -1131,14 +982,12 @@ def admin_withdrawals(message):
         text = f"""
 💸 *WITHDRAWAL REQUEST*
 
-👤 *User:* @{req.get('username', 'Unknown')}
-🆔 *ID:* `{req['user_id']}`
-💰 *Amount:* {format_money(req['amount'])}
-💳 *Method:* {req['method'].upper()}
-📅 *Requested:* {req_date.strftime('%d/%m/%Y %H:%M')}
+👤 @{req.get('username', 'Unknown')}
+💰 {format_money(req['amount'])}
+💳 {req['method'].upper()}
+📅 {req_date.strftime('%d/%m/%Y %H:%M')}
 
-📝 *Account Details:*
-`{req['account_details'][:200]}`
+📝 Details: `{req['account_details'][:100]}`
 """
         bot.send_message(message.chat.id, text, parse_mode='Markdown', reply_markup=keyboard)
 
@@ -1150,7 +999,7 @@ def admin_submissions(message):
     pending = list(submissions.find({'status': 'pending'}).limit(20))
     
     if not pending:
-        bot.send_message(message.chat.id, "✅ No pending task submissions!")
+        bot.send_message(message.chat.id, "✅ No pending submissions!")
         return
     
     for sub in pending:
@@ -1165,12 +1014,12 @@ def admin_submissions(message):
             sub_date = datetime.fromisoformat(sub_date)
         
         caption = f"""
-📋 *TASK SUBMISSION*
+📋 *SUBMISSION*
 
-👤 *User:* @{sub.get('username', 'Unknown')}
-📝 *Task:* {sub['task_title']}
-💰 *Reward:* {format_money(sub['task_amount'])}
-📅 *Submitted:* {sub_date.strftime('%d/%m/%Y %H:%M')}
+👤 @{sub.get('username', 'Unknown')}
+📝 {sub['task_title']}
+💰 {format_money(sub['task_amount'])}
+📅 {sub_date.strftime('%d/%m/%Y %H:%M')}
 """
         
         try:
@@ -1180,6 +1029,116 @@ def admin_submissions(message):
             bot.send_message(message.chat.id, caption + "\n⚠️ Screenshot unavailable",
                            parse_mode='Markdown', reply_markup=keyboard)
 
+@bot.message_handler(func=lambda m: m.text == '📢 Broadcast')
+def broadcast_prompt(message):
+    if message.chat.id != ADMIN_USER_ID:
+        return
+    
+    msg = bot.send_message(message.chat.id,
+        "📢 *Broadcast Message*\n\nSend the message to broadcast to all users.\nSend 'cancel' to cancel.",
+        parse_mode='Markdown')
+    bot.register_next_step_handler(msg, send_broadcast)
+
+def send_broadcast(message):
+    if message.text and message.text.lower() == 'cancel':
+        bot.send_message(message.chat.id, "❌ Broadcast cancelled.")
+        return
+    
+    broadcast_text = message.text
+    all_users = list(users.find({}, {'user_id': 1}))
+    total = len(all_users)
+    success = 0
+    
+    status_msg = bot.send_message(message.chat.id, f"📤 Broadcasting to {total} users...")
+    
+    for user in all_users:
+        try:
+            bot.send_message(int(user['user_id']), 
+                f"📢 *ANNOUNCEMENT*\n\n{broadcast_text}\n\n— Earning Pro Team",
+                parse_mode='Markdown')
+            success += 1
+            time.sleep(0.05)
+        except:
+            pass
+    
+    bot.edit_message_text(f"✅ Broadcast Complete!\n\nSent to: {success}/{total} users", 
+                         message.chat.id, status_msg.message_id)
+
+@bot.message_handler(func=lambda m: m.text == '➕ Add Task')
+def add_task_prompt(message):
+    if message.chat.id != ADMIN_USER_ID:
+        return
+    
+    msg = bot.send_message(message.chat.id, 
+        "📝 *Add New Task*\n\nSend: `Title | Amount | Link | Description`\n\nExample:\n`Subscribe | 5 | https://t.me/channel | Subscribe and screenshot`",
+        parse_mode='Markdown')
+    bot.register_next_step_handler(msg, save_new_task)
+
+def save_new_task(message):
+    if message.text and message.text.lower() == 'cancel':
+        bot.send_message(message.chat.id, "❌ Cancelled.")
+        return
+    
+    parts = message.text.split('|')
+    if len(parts) < 3:
+        bot.send_message(message.chat.id, "❌ Invalid format! Use: Title | Amount | Link | Description")
+        return
+    
+    title = parts[0].strip()
+    try:
+        amount = float(parts[1].strip())
+    except:
+        bot.send_message(message.chat.id, "❌ Invalid amount!")
+        return
+    link = parts[2].strip() if len(parts) > 2 else ""
+    description = parts[3].strip() if len(parts) > 3 else "Complete the task"
+    
+    tasks.insert_one({
+        'title': title, 'amount': amount, 'link': link,
+        'description': description, 'active': True, 'created_at': datetime.now()
+    })
+    bot.send_message(message.chat.id, f"✅ Task '{title}' added!", reply_markup=admin_keyboard())
+
+@bot.message_handler(func=lambda m: m.text == '➕ Add Visit Task')
+def add_visit_task_prompt(message):
+    if message.chat.id != ADMIN_USER_ID:
+        return
+    
+    msg = bot.send_message(message.chat.id,
+        "🔗 *Add Visit Task*\n\nSend: `Title | Amount | Time(seconds) | Link`\n\nExample:\n`Visit Site | 2 | 10 | https://example.com`",
+        parse_mode='Markdown')
+    bot.register_next_step_handler(msg, save_new_visit_task)
+
+def save_new_visit_task(message):
+    if message.text and message.text.lower() == 'cancel':
+        bot.send_message(message.chat.id, "❌ Cancelled.")
+        return
+    
+    parts = message.text.split('|')
+    if len(parts) < 4:
+        bot.send_message(message.chat.id, "❌ Invalid format!")
+        return
+    
+    title = parts[0].strip()
+    try:
+        amount = float(parts[1].strip())
+    except:
+        bot.send_message(message.chat.id, "❌ Invalid amount!")
+        return
+    try:
+        time_req = int(parts[2].strip())
+    except:
+        bot.send_message(message.chat.id, "❌ Invalid time!")
+        return
+    link = parts[3].strip()
+    
+    visit_tasks.insert_one({
+        'title': title, 'amount': amount, 'time_required': time_req,
+        'link': link, 'active': True, 'created_at': datetime.now()
+    })
+    bot.send_message(message.chat.id, f"✅ Visit task '{title}' added!", reply_markup=admin_keyboard())
+
+# ==================== CALLBACK HANDLERS FOR ADMIN ====================
 @bot.callback_query_handler(func=lambda call: call.data.startswith('approve_wd_'))
 def approve_withdrawal(call):
     if call.message.chat.id != ADMIN_USER_ID:
@@ -1191,16 +1150,15 @@ def approve_withdrawal(call):
     
     if wd:
         withdrawals.update_one({'_id': ObjectId(wd_id)}, {'$set': {'status': 'approved', 'processed_at': datetime.now()}})
-        
         try:
             bot.send_message(int(wd['user_id']),
-                f"✅ *Withdrawal Approved!*\n\n💰 Amount: {format_money(wd['amount'])}\n💳 Method: {wd['method'].upper()}\n\nAmount will be sent to your provided details within 24 hours.",
+                f"✅ *Withdrawal Approved!*\n\n💰 {format_money(wd['amount'])} will be sent soon.",
                 parse_mode='Markdown')
         except:
             pass
     
-    bot.answer_callback_query(call.id, "Withdrawal Approved!")
-    bot.edit_message_text("✅ *APPROVED*", call.message.chat.id, call.message.message_id, parse_mode='Markdown')
+    bot.answer_callback_query(call.id, "Approved!")
+    bot.edit_message_text("✅ APPROVED", call.message.chat.id, call.message.message_id)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('reject_wd_'))
 def reject_withdrawal(call):
@@ -1212,19 +1170,17 @@ def reject_withdrawal(call):
     wd = withdrawals.find_one({'_id': ObjectId(wd_id)})
     
     if wd:
-        # Refund balance
         update_balance(wd['user_id'], wd['amount'], 'add')
         withdrawals.update_one({'_id': ObjectId(wd_id)}, {'$set': {'status': 'rejected', 'processed_at': datetime.now()}})
-        
         try:
             bot.send_message(int(wd['user_id']),
-                f"❌ *Withdrawal Rejected*\n\n💰 Amount: {format_money(wd['amount'])}\n\nReason: Invalid details or verification failed.\nAmount has been refunded to your balance.\nPlease submit a new request with correct details.",
+                f"❌ *Withdrawal Rejected*\n\nAmount {format_money(wd['amount'])} refunded.",
                 parse_mode='Markdown')
         except:
             pass
     
-    bot.answer_callback_query(call.id, "Withdrawal Rejected!")
-    bot.edit_message_text("❌ *REJECTED*", call.message.chat.id, call.message.message_id, parse_mode='Markdown')
+    bot.answer_callback_query(call.id, "Rejected!")
+    bot.edit_message_text("❌ REJECTED", call.message.chat.id, call.message.message_id)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('approve_sub_'))
 def approve_submission(call):
@@ -1236,27 +1192,21 @@ def approve_submission(call):
     sub = submissions.find_one({'_id': ObjectId(sub_id)})
     
     if sub:
-        # Credit reward
         update_balance(sub['user_id'], sub['task_amount'], 'add')
-        add_transaction(sub['user_id'], sub['task_amount'], 'task', f'Task Completed: {sub["task_title"]}')
-        
-        # Mark task as completed
-        users.update_one({'user_id': sub['user_id']}, {
-            '$push': {'completed_tasks': sub['task_id']}
-        })
-        
+        add_transaction(sub['user_id'], sub['task_amount'], 'task', f'Task: {sub["task_title"]}')
+        users.update_one({'user_id': sub['user_id']}, {'$push': {'completed_tasks': sub['task_id']}})
         submissions.update_one({'_id': ObjectId(sub_id)}, {'$set': {'status': 'approved'}})
         
         try:
             bot.send_message(int(sub['user_id']),
-                f"✅ *Task Approved!*\n\n📝 Task: {sub['task_title']}\n💰 Reward: {format_money(sub['task_amount'])}\n\nKeep earning! 🚀",
+                f"✅ *Task Approved!*\n\n{sub['task_title']}\n💰 {format_money(sub['task_amount'])}",
                 parse_mode='Markdown')
         except:
             pass
     
-    bot.answer_callback_query(call.id, "Submission Approved!")
+    bot.answer_callback_query(call.id, "Approved!")
     try:
-        bot.edit_message_caption("✅ *APPROVED*", call.message.chat.id, call.message.message_id, parse_mode='Markdown')
+        bot.edit_message_caption("✅ APPROVED", call.message.chat.id, call.message.message_id)
     except:
         pass
 
@@ -1271,260 +1221,24 @@ def reject_submission(call):
     
     if sub:
         submissions.update_one({'_id': ObjectId(sub_id)}, {'$set': {'status': 'rejected'}})
-        
         try:
             bot.send_message(int(sub['user_id']),
-                f"❌ *Task Rejected*\n\n📝 Task: {sub['task_title']}\n\nReason: Invalid or fake submission.\nPlease complete the task correctly and resubmit.",
+                f"❌ *Task Rejected*\n\n{sub['task_title']}\nPlease resubmit correctly.",
                 parse_mode='Markdown')
         except:
             pass
     
-    bot.answer_callback_query(call.id, "Submission Rejected!")
+    bot.answer_callback_query(call.id, "Rejected!")
     try:
-        bot.edit_message_caption("❌ *REJECTED*", call.message.chat.id, call.message.message_id, parse_mode='Markdown')
+        bot.edit_message_caption("❌ REJECTED", call.message.chat.id, call.message.message_id)
     except:
         pass
-
-@bot.message_handler(func=lambda m: m.text == '📝 Manage Tasks')
-def manage_tasks(message):
-    if message.chat.id != ADMIN_USER_ID:
-        return
-    
-    tasks_list = list(tasks.find())
-    
-    if not tasks_list:
-        bot.send_message(message.chat.id, "No tasks found. Use '➕ Add Task' to create one.")
-        return
-    
-    for task in tasks_list:
-        status = "✅ Active" if task.get('active', False) else "❌ Inactive"
-        keyboard = types.InlineKeyboardMarkup(row_width=2)
-        keyboard.add(
-            types.InlineKeyboardButton("🔄 Toggle Status", callback_data=f"toggle_task_{task['_id']}"),
-            types.InlineKeyboardButton("🗑 Delete", callback_data=f"delete_task_{task['_id']}")
-        )
-        
-        text = f"""
-📝 *Task: {task['title']}*
-💰 Reward: {format_money(task['amount'])}
-📋 Status: {status}
-🔗 Link: {task.get('link', 'No link')}
-📝 Desc: {task.get('description', 'No description')[:100]}
-"""
-        bot.send_message(message.chat.id, text, parse_mode='Markdown', reply_markup=keyboard)
-
-@bot.message_handler(func=lambda m: m.text == '🔗 Manage Visit Tasks')
-def manage_visit_tasks(message):
-    if message.chat.id != ADMIN_USER_ID:
-        return
-    
-    v_tasks = list(visit_tasks.find())
-    
-    if not v_tasks:
-        bot.send_message(message.chat.id, "No visit tasks found. Use '➕ Add Visit Task' to create one.")
-        return
-    
-    for task in v_tasks:
-        status = "✅ Active" if task.get('active', False) else "❌ Inactive"
-        keyboard = types.InlineKeyboardMarkup(row_width=2)
-        keyboard.add(
-            types.InlineKeyboardButton("🔄 Toggle Status", callback_data=f"toggle_vtask_{task['_id']}"),
-            types.InlineKeyboardButton("🗑 Delete", callback_data=f"delete_vtask_{task['_id']}")
-        )
-        
-        text = f"""
-🔗 *Visit Task: {task['title']}*
-💰 Reward: {format_money(task['amount'])}
-⏱️ Time: {task['time_required']}s
-📋 Status: {status}
-🔗 Link: {task.get('link', 'No link')}
-"""
-        bot.send_message(message.chat.id, text, parse_mode='Markdown', reply_markup=keyboard)
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith('toggle_task_'))
-def toggle_task(call):
-    if call.message.chat.id != ADMIN_USER_ID:
-        bot.answer_callback_query(call.id, "Unauthorized!")
-        return
-    
-    task_id = call.data.replace('toggle_task_', '')
-    task = tasks.find_one({'_id': ObjectId(task_id)})
-    
-    if task:
-        new_status = not task.get('active', False)
-        tasks.update_one({'_id': ObjectId(task_id)}, {'$set': {'active': new_status}})
-        bot.answer_callback_query(call.id, f"Task {'activated' if new_status else 'deactivated'}!")
-        bot.edit_message_text(f"✅ Task {'Activated' if new_status else 'Deactivated'}", 
-                            call.message.chat.id, call.message.message_id)
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith('delete_task_'))
-def delete_task(call):
-    if call.message.chat.id != ADMIN_USER_ID:
-        bot.answer_callback_query(call.id, "Unauthorized!")
-        return
-    
-    task_id = call.data.replace('delete_task_', '')
-    tasks.delete_one({'_id': ObjectId(task_id)})
-    bot.answer_callback_query(call.id, "Task deleted!")
-    bot.delete_message(call.message.chat.id, call.message.message_id)
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith('toggle_vtask_'))
-def toggle_vtask(call):
-    if call.message.chat.id != ADMIN_USER_ID:
-        bot.answer_callback_query(call.id, "Unauthorized!")
-        return
-    
-    task_id = call.data.replace('toggle_vtask_', '')
-    task = visit_tasks.find_one({'_id': ObjectId(task_id)})
-    
-    if task:
-        new_status = not task.get('active', False)
-        visit_tasks.update_one({'_id': ObjectId(task_id)}, {'$set': {'active': new_status}})
-        bot.answer_callback_query(call.id, f"Visit task {'activated' if new_status else 'deactivated'}!")
-        bot.edit_message_text(f"✅ Visit Task {'Activated' if new_status else 'Deactivated'}", 
-                            call.message.chat.id, call.message.message_id)
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith('delete_vtask_'))
-def delete_vtask(call):
-    if call.message.chat.id != ADMIN_USER_ID:
-        bot.answer_callback_query(call.id, "Unauthorized!")
-        return
-    
-    task_id = call.data.replace('delete_vtask_', '')
-    visit_tasks.delete_one({'_id': ObjectId(task_id)})
-    bot.answer_callback_query(call.id, "Visit task deleted!")
-    bot.delete_message(call.message.chat.id, call.message.message_id)
-
-@bot.message_handler(func=lambda m: m.text == '➕ Add Task')
-def add_task_prompt(message):
-    if message.chat.id != ADMIN_USER_ID:
-        return
-    
-    msg = bot.send_message(message.chat.id, 
-        "📝 *Add New Task*\n\nSend task details in this format:\n\n`Title | Amount | Link | Description`\n\nExample:\n`Subscribe to Channel | 5 | https://t.me/channel | Subscribe and send screenshot`\n\nSend 'cancel' to cancel.",
-        parse_mode='Markdown')
-    bot.register_next_step_handler(msg, save_new_task)
-
-def save_new_task(message):
-    if message.text and message.text.lower() == 'cancel':
-        bot.send_message(message.chat.id, "❌ Task creation cancelled.")
-        return
-    
-    parts = message.text.split('|')
-    if len(parts) < 3:
-        bot.send_message(message.chat.id, "❌ Invalid format! Use: `Title | Amount | Link | Description`", parse_mode='Markdown')
-        return
-    
-    title = parts[0].strip()
-    try:
-        amount = float(parts[1].strip())
-    except:
-        bot.send_message(message.chat.id, "❌ Invalid amount! Use a number.")
-        return
-    link = parts[2].strip() if len(parts) > 2 else ""
-    description = parts[3].strip() if len(parts) > 3 else "Complete the task"
-    
-    task = {
-        'title': title,
-        'amount': amount,
-        'link': link,
-        'description': description,
-        'active': True,
-        'created_at': datetime.now()
-    }
-    
-    tasks.insert_one(task)
-    bot.send_message(message.chat.id, f"✅ Task '{title}' added successfully!", reply_markup=admin_keyboard())
-
-@bot.message_handler(func=lambda m: m.text == '➕ Add Visit Task')
-def add_visit_task_prompt(message):
-    if message.chat.id != ADMIN_USER_ID:
-        return
-    
-    msg = bot.send_message(message.chat.id,
-        "🔗 *Add New Visit Task*\n\nSend task details in this format:\n\n`Title | Amount | Time(seconds) | Link`\n\nExample:\n`Visit Website | 2 | 10 | https://example.com`\n\nSend 'cancel' to cancel.",
-        parse_mode='Markdown')
-    bot.register_next_step_handler(msg, save_new_visit_task)
-
-def save_new_visit_task(message):
-    if message.text and message.text.lower() == 'cancel':
-        bot.send_message(message.chat.id, "❌ Visit task creation cancelled.")
-        return
-    
-    parts = message.text.split('|')
-    if len(parts) < 4:
-        bot.send_message(message.chat.id, "❌ Invalid format! Use: `Title | Amount | Time(seconds) | Link`", parse_mode='Markdown')
-        return
-    
-    title = parts[0].strip()
-    try:
-        amount = float(parts[1].strip())
-    except:
-        bot.send_message(message.chat.id, "❌ Invalid amount!")
-        return
-    try:
-        time_req = int(parts[2].strip())
-    except:
-        bot.send_message(message.chat.id, "❌ Invalid time! Use seconds.")
-        return
-    link = parts[3].strip()
-    
-    task = {
-        'title': title,
-        'amount': amount,
-        'time_required': time_req,
-        'link': link,
-        'active': True,
-        'created_at': datetime.now()
-    }
-    
-    visit_tasks.insert_one(task)
-    bot.send_message(message.chat.id, f"✅ Visit task '{title}' added successfully!", reply_markup=admin_keyboard())
-
-@bot.message_handler(func=lambda m: m.text == '📢 Broadcast')
-def broadcast_prompt(message):
-    if message.chat.id != ADMIN_USER_ID:
-        return
-    
-    msg = bot.send_message(message.chat.id,
-        "📢 *Broadcast Message*\n\nSend the message you want to broadcast to all users.\n\nSend 'cancel' to cancel.",
-        parse_mode='Markdown')
-    bot.register_next_step_handler(msg, send_broadcast)
-
-def send_broadcast(message):
-    if message.text and message.text.lower() == 'cancel':
-        bot.send_message(message.chat.id, "❌ Broadcast cancelled.")
-        return
-    
-    broadcast_text = message.text
-    
-    # Get all users
-    all_users = list(users.find({}, {'user_id': 1}))
-    total = len(all_users)
-    success = 0
-    
-    status_msg = bot.send_message(message.chat.id, f"📤 Broadcasting to {total} users...")
-    
-    for user in all_users:
-        try:
-            bot.send_message(int(user['user_id']), 
-                f"📢 *ANNOUNCEMENT*\n\n{broadcast_text}\n\n— Earning Pro Team",
-                parse_mode='Markdown')
-            success += 1
-            time.sleep(0.05)  # Rate limit protection
-        except:
-            pass
-    
-    bot.edit_message_text(f"✅ Broadcast Complete!\n\nSent to: {success}/{total} users", 
-                         message.chat.id, status_msg.message_id)
 
 # ==================== CATCH ALL ====================
 @bot.message_handler(func=lambda m: True)
 def catch_all(message):
-    if not message.text.startswith('/') and message.text not in ['📝 Tasks', '🔗 Visit & Earn', '💰 My Balance', '💸 Withdraw', '👥 Referral Program', '🎁 Daily Bonus', '📊 My Stats', '📢 Announcements', '❓ Help', 'ℹ️ About']:
-        bot.send_message(message.chat.id, 
-            "❓ Please use the buttons below to navigate.\n\nType /start to see all options.",
-            reply_markup=main_keyboard())
+    if not message.text.startswith('/') and message.text not in ['📝 Tasks', '🔗 Visit & Earn', '💰 My Balance', '💸 Withdraw', '👥 Referral Program', '🎁 Daily Bonus', '📊 My Stats', '❓ Help', 'ℹ️ About', ADMIN_PASSWORD, '📊 Dashboard', '👥 User Stats', '💰 Financial Stats', '💸 Withdrawal Requests', '📋 Pending Submissions', '📢 Broadcast', '➕ Add Task', '➕ Add Visit Task', '🔙 Exit Admin']:
+        bot.send_message(message.chat.id, "❓ Use the buttons below.\nType /start to see all options.", reply_markup=main_keyboard())
 
 # ==================== MAIN ====================
 if __name__ == '__main__':
@@ -1536,14 +1250,11 @@ if __name__ == '__main__':
     # Connect to MongoDB
     if not connect_mongodb():
         print("❌ MongoDB connection failed!")
+        print("💡 Make sure MONGODB_URI is correct in Railway variables")
         sys.exit(1)
     
     # Initialize collections
     init_collections()
-    
-    # Initialize bot
-    bot = telebot.TeleBot(API_TOKEN, threaded=False)
-    print("✅ Bot initialized")
     
     # Start health server
     health_thread = threading.Thread(target=start_health_server, daemon=True)
@@ -1554,8 +1265,8 @@ if __name__ == '__main__':
     try:
         bot.remove_webhook()
         print("✅ Webhook removed")
-    except:
-        pass
+    except Exception as e:
+        print(f"⚠️ Webhook removal: {e}")
     
     print("=" * 60)
     print("🚀 BOT IS RUNNING!")
